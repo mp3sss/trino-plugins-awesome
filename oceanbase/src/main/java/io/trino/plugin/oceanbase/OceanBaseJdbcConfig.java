@@ -13,15 +13,31 @@
  */
 package io.trino.plugin.oceanbase;
 
+import com.oceanbase.jdbc.Driver;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
-import jakarta.validation.constraints.AssertTrue;
+
+import javax.validation.constraints.AssertTrue;
+
+import java.sql.SQLException;
 
 public class OceanBaseJdbcConfig
         extends BaseJdbcConfig
 {
-    @AssertTrue(message = "Invalid JDBC URL for OceanBase connector")
+    @AssertTrue(message = "Invalid JDBC URL for MySQL connector")
     public boolean isUrlValid()
     {
-        return getConnectionUrl().startsWith("jdbc:oceanbase://");
+        try {
+            Driver driver = new Driver();
+            return driver.acceptsURL(getConnectionUrl());
+        }
+        catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @AssertTrue(message = "Database (catalog) must not be specified in JDBC URL for MySQL connector")
+    public boolean isUrlWithoutDatabase()
+    {
+        return true;
     }
 }

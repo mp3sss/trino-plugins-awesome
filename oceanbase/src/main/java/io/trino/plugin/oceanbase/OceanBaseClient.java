@@ -14,15 +14,14 @@
 package io.trino.plugin.oceanbase;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.inject.Inject;
-import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
-import io.trino.plugin.base.aggregation.AggregateFunctionRule;
-import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
-import io.trino.plugin.base.mapping.IdentifierMapping;
+import com.oceanbase.jdbc.JDBC4PreparedStatement;
+import io.airlift.log.Logger;
+import io.trino.plugin.base.expression.AggregateFunctionRewriter;
+import io.trino.plugin.base.expression.AggregateFunctionRule;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
-import io.trino.plugin.jdbc.BooleanWriteFunction;
 import io.trino.plugin.jdbc.ColumnMapping;
 import io.trino.plugin.jdbc.ConnectionFactory;
 import io.trino.plugin.jdbc.JdbcColumnHandle;
@@ -31,85 +30,59 @@ import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcTableHandle;
 import io.trino.plugin.jdbc.JdbcTypeHandle;
-import io.trino.plugin.jdbc.LongReadFunction;
-import io.trino.plugin.jdbc.LongWriteFunction;
-import io.trino.plugin.jdbc.ObjectReadFunction;
-import io.trino.plugin.jdbc.ObjectWriteFunction;
 import io.trino.plugin.jdbc.PreparedQuery;
-import io.trino.plugin.jdbc.QueryBuilder;
-import io.trino.plugin.jdbc.RemoteTableName;
-import io.trino.plugin.jdbc.StandardColumnMappings;
+import io.trino.plugin.jdbc.UnsupportedTypeHandling;
 import io.trino.plugin.jdbc.WriteMapping;
-import io.trino.plugin.jdbc.aggregation.ImplementAvgDecimal;
-import io.trino.plugin.jdbc.aggregation.ImplementAvgFloatingPoint;
-import io.trino.plugin.jdbc.aggregation.ImplementCount;
-import io.trino.plugin.jdbc.aggregation.ImplementCountAll;
-import io.trino.plugin.jdbc.aggregation.ImplementCountDistinct;
-import io.trino.plugin.jdbc.aggregation.ImplementCovariancePop;
-import io.trino.plugin.jdbc.aggregation.ImplementCovarianceSamp;
-import io.trino.plugin.jdbc.aggregation.ImplementMinMax;
-import io.trino.plugin.jdbc.aggregation.ImplementStddevPop;
-import io.trino.plugin.jdbc.aggregation.ImplementStddevSamp;
-import io.trino.plugin.jdbc.aggregation.ImplementSum;
-import io.trino.plugin.jdbc.aggregation.ImplementVariancePop;
-import io.trino.plugin.jdbc.aggregation.ImplementVarianceSamp;
-import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
-import io.trino.plugin.jdbc.expression.ParameterizedExpression;
-import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
+import io.trino.plugin.jdbc.expression.ImplementAvgDecimal;
+import io.trino.plugin.jdbc.expression.ImplementAvgFloatingPoint;
+import io.trino.plugin.jdbc.expression.ImplementCount;
+import io.trino.plugin.jdbc.expression.ImplementCountAll;
+import io.trino.plugin.jdbc.expression.ImplementMinMax;
+import io.trino.plugin.jdbc.expression.ImplementStddevPop;
+import io.trino.plugin.jdbc.expression.ImplementStddevSamp;
+import io.trino.plugin.jdbc.expression.ImplementSum;
+import io.trino.plugin.jdbc.expression.ImplementVariancePop;
+import io.trino.plugin.jdbc.expression.ImplementVarianceSamp;
+import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.JoinCondition;
 import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
-import io.trino.spi.type.LongTimestamp;
-import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.StandardTypes;
-import io.trino.spi.type.TimeType;
 import io.trino.spi.type.TimestampType;
-import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.VarcharType;
-import jakarta.annotation.Nullable;
+
+import javax.inject.Inject;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.sql.Types;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeFormatterBuilder;
-import java.time.temporal.ChronoField;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Strings.emptyToNull;
-import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Verify.verify;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
@@ -117,187 +90,127 @@ import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalDef
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRounding;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRoundingMode;
 import static io.trino.plugin.jdbc.JdbcErrorCode.JDBC_ERROR;
-import static io.trino.plugin.jdbc.JdbcJoinPushdownUtil.implementJoinCostAware;
 import static io.trino.plugin.jdbc.PredicatePushdownController.DISABLE_PUSHDOWN;
 import static io.trino.plugin.jdbc.PredicatePushdownController.FULL_PUSHDOWN;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.bigintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.booleanColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.charWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.dateReadFunctionUsingLocalDate;
+import static io.trino.plugin.jdbc.StandardColumnMappings.dateColumnMapping;
+import static io.trino.plugin.jdbc.StandardColumnMappings.dateWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.decimalColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.defaultCharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.defaultVarcharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.fromLongTrinoTimestamp;
-import static io.trino.plugin.jdbc.StandardColumnMappings.fromTrinoTimestamp;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampReadFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.longTimestampWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.realColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.smallintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.timeWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.timestampReadFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampColumnMapping;
+import static io.trino.plugin.jdbc.StandardColumnMappings.timestampWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
-import static io.trino.plugin.jdbc.StandardColumnMappings.toTrinoTimestamp;
-import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryColumnMapping;
+import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryReadFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varbinaryWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
+import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
+import static io.trino.plugin.jdbc.UnsupportedTypeHandling.IGNORE;
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.type.BigintType.BIGINT;
-import static io.trino.spi.type.BooleanType.BOOLEAN;
-import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
-import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimeType.createTimeType;
-import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
-import static io.trino.spi.type.TimestampType.TIMESTAMP_SECONDS;
+import static io.trino.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
 import static io.trino.spi.type.TimestampType.createTimestampType;
-import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
-import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
-import static io.trino.spi.type.Timestamps.MILLISECONDS_PER_SECOND;
-import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MILLISECOND;
-import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
-import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
-import static java.lang.Float.floatToRawIntBits;
-import static java.lang.Math.floorDiv;
-import static java.lang.Math.floorMod;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.String.format;
-import static java.lang.String.join;
-import static java.time.format.DateTimeFormatter.ISO_DATE;
-import static java.util.Locale.ENGLISH;
-import static java.util.concurrent.TimeUnit.DAYS;
+import static java.sql.DatabaseMetaData.columnNoNulls;
 import static java.util.stream.Collectors.joining;
 
 public class OceanBaseClient
         extends BaseJdbcClient
 {
-    private static final int TYPE_BINARY_FLOAT = 100;
-    private static final int TYPE_BINARY_DOUBLE = 101;
-
-    private static final int ZERO_PRECISION_TIME_COLUMN_SIZE = 10;
+    private static final int MAX_SUPPORTED_TIMESTAMP_PRECISION = 6;
+    // MySQL driver returns width of timestamp types instead of precision.
+    // 19 characters are used for zero-precision timestamps while others
+    // require 19 + precision + 1 characters with the additional character
+    // required for the decimal separator.
     private static final int ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE = 19;
-    private static final int MYSQL_MODE_MAX_TIMESTAMP_PRECISION = 6;
-    private static final int ORACLE_MODE_MAX_TIMESTAMP_PRECISION = 9;
+    private static final Logger log = Logger.get(OceanBaseClient.class);
 
-    private static final int BYTES_PER_CHAR = 4;
-    private static final int MYSQL_MODE_CHAR_MAX_LENGTH = 256;
-    private static final int ORACLE_MODE_CHAR_MAX_BYTES = 2000;
-    private static final int ORACLE_MODE_CHAR_MAX_LENGTH = ORACLE_MODE_CHAR_MAX_BYTES / BYTES_PER_CHAR;
-    private static final int VARCHAR2_MAX_BYTES = 32767;
-    private static final int VARCHAR2_MAX_LENGTH = VARCHAR2_MAX_BYTES / BYTES_PER_CHAR;
-    private static final int TINYTEXT_MAX_BYTES = 255;
-    private static final int TEXT_MAX_BYTES = 65535;
-    private static final int MEDIUMTEXT_MAX_BYTES = 16777215;
-
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd");
-    private static final DateTimeFormatter TIMESTAMP_SECONDS_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
-    private static final DateTimeFormatter TIMESTAMP_NANO_OPTIONAL_FORMATTER = new DateTimeFormatterBuilder().appendPattern("uuuu-MM-dd HH:mm:ss").optionalStart().appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true).optionalEnd().toFormatter();
-
-    private static final Set<String> INTERNAL_DATABASES = ImmutableSet.<String>builder().add("information_schema").add("mysql").add("oceanbase").build();
-
-    private static final Set<String> INTERNAL_SCHEMAS = ImmutableSet.<String>builder().add("SYS").add("LBACSYS").add("ORAAUDITOR").build();
-
-    private final OceanBaseCompatibleMode compatibleMode;
     private final Type jsonType;
-    private final ConnectorExpressionRewriter<ParameterizedExpression> connectorExpressionRewriter;
-    private final AggregateFunctionRewriter<JdbcExpression, ?> aggregateFunctionRewriter;
+    private final AggregateFunctionRewriter<JdbcExpression> aggregateFunctionRewriter;
 
     @Inject
-    public OceanBaseClient(BaseJdbcConfig config, OceanBaseConfig obConfig, ConnectionFactory connectionFactory, QueryBuilder queryBuilder, TypeManager typeManager, IdentifierMapping identifierMapping, RemoteQueryModifier queryModifier)
+    public OceanBaseClient(BaseJdbcConfig config, ConnectionFactory connectionFactory, TypeManager typeManager, IdentifierMapping identifierMapping)
     {
-        super(obConfig.getCompatibleMode().isMySQLMode() ? "`" : "\"", connectionFactory, queryBuilder, config.getJdbcTypesMappedToVarchar(), identifierMapping, queryModifier, true);
-
-        this.compatibleMode = obConfig.getCompatibleMode();
-
+        super(config, "`", connectionFactory, identifierMapping);
         this.jsonType = typeManager.getType(new TypeSignature(StandardTypes.JSON));
 
-        this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder().addStandardRules(this::quoted).withTypeClass("numeric_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint", "decimal", "real", "double")).map("$equal(left: numeric_type, right: numeric_type)").to("left = right").map("$not_equal(left: numeric_type, right: numeric_type)").to("left <> right").map("$less_than(left: numeric_type, right: numeric_type)").to("left < right").map("$less_than_or_equal(left: numeric_type, right: numeric_type)").to("left <= right").map("$greater_than(left: numeric_type, right: numeric_type)").to("left > right").map("$greater_than_or_equal(left: numeric_type, right: numeric_type)").to("left >= right").build();
-
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
-        this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(connectorExpressionRewriter, ImmutableSet.<AggregateFunctionRule<JdbcExpression, ParameterizedExpression>>builder().add(new ImplementCountAll(bigintTypeHandle)).add(new ImplementCount(bigintTypeHandle)).add(new ImplementCountDistinct(bigintTypeHandle, true)).add(new ImplementMinMax(true)).add(new ImplementSum(this::toTypeHandle)).add(new ImplementAvgFloatingPoint()).add(new ImplementAvgDecimal()).add(new ImplementStddevSamp()).add(new ImplementStddevPop()).add(new ImplementVarianceSamp()).add(new ImplementVariancePop()).add(new ImplementCovarianceSamp()).add(new ImplementCovariancePop()).build());
-    }
-
-    private Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
-    {
-        return Optional.of(new JdbcTypeHandle(Types.NUMERIC, Optional.of("decimal"), Optional.of(decimalType.getPrecision()), Optional.of(decimalType.getScale()), Optional.empty(), Optional.empty()));
-    }
-
-    @Override
-    protected String quoted(@Nullable String catalog, @Nullable String schema, String table)
-    {
-        StringBuilder sb = new StringBuilder();
-        if (!isNullOrEmpty(schema)) {
-            sb.append(quoted(schema)).append(".");
-        }
-        else if (!isNullOrEmpty(catalog)) {
-            sb.append(quoted(catalog)).append(".");
-        }
-        sb.append(quoted(table));
-        return sb.toString();
-    }
-
-    @Override
-    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
-    {
-        return connectorExpressionRewriter.rewrite(session, expression, assignments);
+        this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
+                this::quoted,
+                ImmutableSet.<AggregateFunctionRule<JdbcExpression>>builder()
+                        .add(new ImplementCountAll(bigintTypeHandle))
+                        .add(new ImplementCount(bigintTypeHandle))
+                        .add(new ImplementMinMax(false))
+                        .add(new ImplementSum(OceanBaseClient::toTypeHandle))
+                        .add(new ImplementAvgFloatingPoint())
+                        .add(new ImplementAvgDecimal())
+                        .add(new ImplementAvgBigint())
+                        .add(new ImplementStddevSamp())
+                        .add(new ImplementStddevPop())
+                        .add(new ImplementVarianceSamp())
+                        .add(new ImplementVariancePop())
+                        .build());
     }
 
     @Override
     public Optional<JdbcExpression> implementAggregation(ConnectorSession session, AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
     {
+        // TODO support complex ConnectorExpressions
         return aggregateFunctionRewriter.rewrite(session, aggregate, assignments);
     }
 
     @Override
-    public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
-            throws SQLException
+    public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets)
     {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        if (columnCount.isPresent()) {
-            statement.setFetchSize(max(100_000 / columnCount.get(), 1_000));
-        }
-        return statement;
+        // Remote database can be case insensitive.
+        return preventTextualTypeAggregationPushdown(groupingSets);
     }
 
-    @Override
-    protected String getTableSchemaName(ResultSet resultSet)
-            throws SQLException
+    private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
     {
-        return compatibleMode.isMySQLMode() ? resultSet.getString("TABLE_CAT") : resultSet.getString("TABLE_SCHEM");
+        return Optional.of(new JdbcTypeHandle(Types.NUMERIC, Optional.of("decimal"), Optional.of(decimalType.getPrecision()), Optional.of(decimalType.getScale()), Optional.empty(), Optional.empty()));
     }
 
     @Override
     public Collection<String> listSchemas(Connection connection)
     {
-        try {
-            DatabaseMetaData databaseMetaData = connection.getMetaData();
-            try (ResultSet resultSet = compatibleMode.isMySQLMode() ? databaseMetaData.getCatalogs() : databaseMetaData.getSchemas()) {
-                ImmutableSet.Builder<String> schemaNames = ImmutableSet.builder();
-                while (resultSet.next()) {
-                    String schemaName = getTableSchemaName(resultSet);
-                    // skip internal schemas
-                    if (filterSchema(schemaName)) {
-                        schemaNames.add(schemaName);
-                    }
+        // for MySQL, we need to list catalogs instead of schemas
+        try (ResultSet resultSet = connection.getMetaData().getCatalogs()) {
+            ImmutableSet.Builder<String> schemaNames = ImmutableSet.builder();
+            while (resultSet.next()) {
+                String schemaName = resultSet.getString("TABLE_CAT");
+                // skip internal schemas
+                if (filterSchema(schemaName)) {
+                    schemaNames.add(schemaName);
                 }
-                return schemaNames.build();
             }
+            return schemaNames.build();
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -307,196 +220,357 @@ public class OceanBaseClient
     @Override
     protected boolean filterSchema(String schemaName)
     {
-        return compatibleMode.isMySQLMode() ? !INTERNAL_DATABASES.contains(schemaName.toLowerCase(Locale.ENGLISH)) : !INTERNAL_SCHEMAS.contains(schemaName.toUpperCase(Locale.ENGLISH));
-    }
-
-    @Override
-    public void createSchema(ConnectorSession session, String schemaName)
-    {
-        if (!compatibleMode.isMySQLMode()) {
-            throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating schemas on Oracle mode");
+        if (schemaName.equalsIgnoreCase("gbase")
+                || schemaName.equalsIgnoreCase("sys")) {
+            return false;
         }
-        super.createSchema(session, schemaName);
+        return super.filterSchema(schemaName);
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
-    {
-        if (!compatibleMode.isMySQLMode()) {
-            throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping schemas on Oracle mode");
-        }
-        super.dropSchema(session, schemaName, cascade);
-    }
-
-    @Override
-    protected void dropSchema(ConnectorSession session, Connection connection, String remoteSchemaName, boolean cascade)
+    public void abortReadConnection(Connection connection)
             throws SQLException
     {
-        if (!cascade) {
-            try (ResultSet tables = getTables(connection, Optional.of(remoteSchemaName), Optional.empty())) {
-                if (tables.next()) {
-                    throw new TrinoException(SCHEMA_NOT_EMPTY, "Cannot drop non-empty schema '%s'".formatted(remoteSchemaName));
+        // Abort connection before closing. Without this, the MySQL driver
+        // attempts to drain the connection by reading all the results.
+        connection.abort(directExecutor());
+    }
+
+    @Override
+    public PreparedStatement getPreparedStatement(Connection connection, String sql)
+            throws SQLException
+    {
+        PreparedStatement statement = connection.prepareStatement(sql);
+        if (statement.isWrapperFor(JDBC4PreparedStatement.class)) {
+            statement.unwrap(JDBC4PreparedStatement.class);
+        }
+        return statement;
+    }
+
+    @Override
+    public ResultSet getTables(Connection connection, Optional<String> schemaName, Optional<String> tableName)
+            throws SQLException
+    {
+        // MySQL maps their "database" to SQL catalogs and does not have schemas
+        DatabaseMetaData metadata = connection.getMetaData();
+        return metadata.getTables(
+                schemaName.orElse(null),
+                null,
+                escapeNamePattern(tableName, metadata.getSearchStringEscape()).orElse(null),
+                getTableTypes().map(types -> types.toArray(String[]::new)).orElse(null));
+    }
+
+    @Override
+    protected String getTableSchemaName(ResultSet resultSet)
+            throws SQLException
+    {
+        // MySQL uses catalogs instead of schemas
+        return resultSet.getString("TABLE_CAT");
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle)
+    {
+        if (tableHandle.getColumns().isPresent()) {
+            return tableHandle.getColumns().get();
+        }
+        checkArgument(tableHandle.isNamedRelation(), "Cannot get columns for %s", tableHandle);
+        SchemaTableName schemaTableName = tableHandle.getRequiredNamedRelation().getSchemaTableName();
+
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            Map<String, Integer> arrayColumnDimensions = ImmutableMap.of();
+            // if (getArrayMapping(session) == AS_ARRAY) {
+            //     arrayColumnDimensions = getArrayColumnDimensions(connection, tableHandle);
+            // }
+            try (ResultSet resultSet = getColumns(tableHandle, connection.getMetaData())) {
+                int allColumns = 0;
+                List<JdbcColumnHandle> columns = new ArrayList<>();
+                while (resultSet.next()) {
+                    allColumns++;
+                    String columnName = resultSet.getString("COLUMN_NAME");
+                    JdbcTypeHandle typeHandle = new JdbcTypeHandle(
+                            getInteger(resultSet, "DATA_TYPE").orElseThrow(() -> new IllegalStateException("DATA_TYPE is null")),
+                            Optional.of(resultSet.getString("TYPE_NAME")),
+                            getInteger(resultSet, "COLUMN_SIZE"),
+                            getInteger(resultSet, "DECIMAL_DIGITS"),
+                            Optional.ofNullable(arrayColumnDimensions.get(columnName)),
+                            Optional.empty());
+                    Optional<ColumnMapping> columnMapping = toColumnMapping(session, connection, typeHandle);
+                    log.debug("Mapping data type of '%s' column '%s': %s mapped to %s", schemaTableName, columnName, typeHandle, columnMapping);
+                    // skip unsupported column types
+                    if (columnMapping.isPresent()) {
+                        boolean nullable = (resultSet.getInt("NULLABLE") != columnNoNulls);
+                        Optional<String> comment = Optional.ofNullable(resultSet.getString("REMARKS"));
+                        columns.add(JdbcColumnHandle.builder()
+                                .setColumnName(columnName)
+                                .setJdbcTypeHandle(typeHandle)
+                                .setColumnType(columnMapping.get().getType())
+                                .setNullable(nullable)
+                                .setComment(comment)
+                                .build());
+                    }
+                    if (columnMapping.isEmpty()) {
+                        UnsupportedTypeHandling unsupportedTypeHandling = getUnsupportedTypeHandling(session);
+                        verify(
+                                unsupportedTypeHandling == IGNORE,
+                                "Unsupported type handling is set to %s, but toTrinoType() returned empty for %s",
+                                unsupportedTypeHandling,
+                                typeHandle);
+                    }
                 }
+                if (columns.isEmpty()) {
+                    // A table may have no supported columns. In rare cases a table might have no columns at all.
+                    throw new TableNotFoundException(
+                            tableHandle.getSchemaTableName(),
+                            format("Table '%s' has no supported columns (all %s columns are not supported)", tableHandle.getSchemaTableName(), allColumns));
+                }
+                return ImmutableList.copyOf(columns);
             }
         }
-        execute(session, connection, "DROP SCHEMA " + quoted(remoteSchemaName));
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
+        }
     }
 
     @Override
-    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming schemas");
-    }
+        log.debug(">>>>toColumnMapping data type");
+        String jdbcTypeName = typeHandle.getJdbcTypeName()
+                .orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
 
-    @Override
-    public ResultSet getTables(Connection connection, Optional<String> remoteSchemaName, Optional<String> remoteTableName)
-            throws SQLException
-    {
-        DatabaseMetaData metadata = connection.getMetaData();
-        String schemaName = escapeObjectNameForMetadataQuery(remoteSchemaName, metadata.getSearchStringEscape()).orElse(null);
-        return metadata.getTables(compatibleMode.isMySQLMode() ? schemaName : null, compatibleMode.isMySQLMode() ? null : schemaName, escapeObjectNameForMetadataQuery(remoteTableName, metadata.getSearchStringEscape()).orElse(null), getTableTypes().map(types -> types.toArray(String[]::new)).orElse(null));
-    }
-
-    @Override
-    public Optional<String> getTableComment(ResultSet resultSet)
-            throws SQLException
-    {
-        return Optional.ofNullable(emptyToNull(resultSet.getString("REMARKS")));
-    }
-
-    @Override
-    protected ResultSet getColumns(JdbcTableHandle tableHandle, DatabaseMetaData metadata)
-            throws SQLException
-    {
-        RemoteTableName remoteTableName = tableHandle.getRequiredNamedRelation().getRemoteTableName();
-        String schemaName = escapeObjectNameForMetadataQuery(remoteTableName.getSchemaName(), metadata.getSearchStringEscape()).orElse(null);
-        return metadata.getColumns(compatibleMode.isMySQLMode() ? schemaName : null, compatibleMode.isMySQLMode() ? null : schemaName, escapeObjectNameForMetadataQuery(remoteTableName.getTableName(), metadata.getSearchStringEscape()), null);
-    }
-
-    @Override
-    protected String getColumnDefinitionSql(ConnectorSession session, ColumnMetadata column, String columnName)
-    {
-        if (column.getComment() != null) {
-            throw new TrinoException(NOT_SUPPORTED, "This connector does not support creating tables with column comment");
+        Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
+        if (mapping.isPresent()) {
+            return mapping;
+        }
+        Optional<ColumnMapping> unsignedMapping = getUnsignedMapping(typeHandle);
+        if (unsignedMapping.isPresent()) {
+            return unsignedMapping;
         }
 
-        return "%s %s %s".formatted(quoted(columnName), toWriteMapping(session, column.getType()).getDataType(), column.isNullable() ? compatibleMode.isMySQLMode() ? "NULL" : "" : "NOT NULL");
-    }
-
-    @Override
-    protected List<String> createTableSqls(RemoteTableName remoteTableName, List<String> columns, ConnectorTableMetadata tableMetadata)
-    {
-        checkArgument(tableMetadata.getProperties().isEmpty(), "Unsupported table properties: %s", tableMetadata.getProperties());
-        ImmutableList.Builder<String> createTableSqlsBuilder = ImmutableList.builder();
-        createTableSqlsBuilder.add(format("CREATE TABLE %s (%s)", quoted(remoteTableName), join(", ", columns)));
-        Optional<String> tableComment = tableMetadata.getComment();
-        if (tableComment.isPresent()) {
-            createTableSqlsBuilder.add(buildTableCommentSql(remoteTableName, tableComment));
+        if (jdbcTypeName.equalsIgnoreCase("json")) {
+            return Optional.of(jsonColumnMapping());
         }
-        return createTableSqlsBuilder.build();
+
+        log.debug(">>>>[1]toColumnMapping data type %s,%d", jdbcTypeName, typeHandle.getJdbcType());
+
+        switch (typeHandle.getJdbcType()) {
+            case Types.TINYINT:
+                return Optional.of(tinyintColumnMapping());
+
+            case Types.SMALLINT:
+                return Optional.of(smallintColumnMapping());
+
+            case Types.INTEGER:
+                return Optional.of(integerColumnMapping());
+
+            case Types.BIGINT:
+                return Optional.of(bigintColumnMapping());
+
+            case Types.REAL:
+                return Optional.of(realColumnMapping());
+
+            case Types.DOUBLE:
+                return Optional.of(doubleColumnMapping());
+
+            case Types.DECIMAL:
+                int decimalDigits = typeHandle.getDecimalDigits().orElseThrow(() -> new IllegalStateException("decimal digits not present"));
+                int precision = typeHandle.getRequiredColumnSize();
+                if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
+                    int scale = min(decimalDigits, getDecimalDefaultScale(session));
+                    return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
+                }
+                // TODO does mysql support negative scale?
+                precision = precision + max(-decimalDigits, 0); // Map decimal(p, -s) (negative scale) to decimal(p+s, 0).
+                if (precision > Decimals.MAX_PRECISION) {
+                    break;
+                }
+                return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
+
+            case Types.CHAR:
+                return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), false));
+
+            // TODO not all these type constants are necessarily used by the JDBC driver
+            case Types.VARCHAR:
+            case Types.NVARCHAR:
+            case Types.LONGVARCHAR:
+            case Types.LONGNVARCHAR:
+                return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), false));
+
+            case Types.BINARY:
+            case Types.VARBINARY:
+            case Types.LONGVARBINARY:
+                return Optional.of(ColumnMapping.sliceMapping(VARBINARY, varbinaryReadFunction(), varbinaryWriteFunction(), FULL_PUSHDOWN));
+
+            case Types.DATE:
+                return Optional.of(dateColumnMapping());
+
+            case Types.TIMESTAMP:
+                TimestampType timestampType = createTimestampType(getTimestampPrecision(typeHandle.getRequiredColumnSize()));
+                return Optional.of(timestampColumnMapping(timestampType));
+            default:
+                log.debug(">>>>[2]toColumnMapping data type %s,%d", jdbcTypeName, typeHandle.getJdbcType());
+                return Optional.of(bigintColumnMapping());
+        }
+
+        // TODO add explicit mappings
+        return legacyColumnMapping(session, connection, typeHandle);
+    }
+
+    private static int getTimestampPrecision(int timestampColumnSize)
+    {
+        if (timestampColumnSize == ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE) {
+            return 0;
+        }
+        int timestampPrecision = timestampColumnSize - ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE - 1;
+        verify(1 <= timestampPrecision && timestampPrecision <= MAX_SUPPORTED_TIMESTAMP_PRECISION, "Unexpected timestamp precision %s calculated from timestamp column size %s", timestampPrecision, timestampColumnSize);
+        return timestampPrecision;
     }
 
     @Override
-    public void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment)
+    public WriteMapping toWriteMapping(ConnectorSession session, Type type)
     {
-        execute(session, buildTableCommentSql(handle.asPlainTable().getRemoteTableName(), comment));
-    }
+        if (type == TINYINT) {
+            return WriteMapping.longMapping("tinyint", tinyintWriteFunction());
+        }
+        if (type == SMALLINT) {
+            return WriteMapping.longMapping("smallint", smallintWriteFunction());
+        }
+        if (type == INTEGER) {
+            return WriteMapping.longMapping("integer", integerWriteFunction());
+        }
+        if (type == BIGINT) {
+            return WriteMapping.longMapping("bigint", bigintWriteFunction());
+        }
+        if (type == REAL) {
+            return WriteMapping.longMapping("float", realWriteFunction());
+        }
+        if (type == DOUBLE) {
+            return WriteMapping.doubleMapping("double precision", doubleWriteFunction());
+        }
 
-    private String buildTableCommentSql(RemoteTableName remoteTableName, Optional<String> comment)
-    {
-        return compatibleMode.isMySQLMode() ? format("COMMENT %s", varcharLiteral(comment.orElse(""))) : format("COMMENT ON TABLE %s IS %s", quoted(remoteTableName), varcharLiteral(comment.orElse("")));
+        if (type instanceof DecimalType) {
+            DecimalType decimalType = (DecimalType) type;
+            String dataType = format("decimal(%s, %s)", decimalType.getPrecision(), decimalType.getScale());
+            if (decimalType.isShort()) {
+                return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
+            }
+            return WriteMapping.sliceMapping(dataType, longDecimalWriteFunction(decimalType));
+        }
+
+        if (type == DATE) {
+            return WriteMapping.longMapping("date", dateWriteFunction());
+        }
+
+        if (TIME_WITH_TIME_ZONE.equals(type) || TIMESTAMP_TZ_MILLIS.equals(type)) {
+            throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
+        }
+
+        if (type instanceof TimestampType) {
+            TimestampType timestampType = (TimestampType) type;
+            if (timestampType.getPrecision() <= MAX_SUPPORTED_TIMESTAMP_PRECISION) {
+                verify(timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION);
+                return WriteMapping.longMapping(format("datetime(%s)", timestampType.getPrecision()), timestampWriteFunction(timestampType));
+            }
+            return WriteMapping.objectMapping(format("datetime(%s)", MAX_SUPPORTED_TIMESTAMP_PRECISION), longTimestampWriteFunction(timestampType, MAX_SUPPORTED_TIMESTAMP_PRECISION));
+        }
+
+        if (VARBINARY.equals(type)) {
+            return WriteMapping.sliceMapping("mediumblob", varbinaryWriteFunction());
+        }
+
+        if (type instanceof CharType) {
+            return WriteMapping.sliceMapping("char(" + ((CharType) type).getLength() + ")", charWriteFunction());
+        }
+
+        if (type instanceof VarcharType) {
+            VarcharType varcharType = (VarcharType) type;
+            String dataType;
+            if (varcharType.isUnbounded()) {
+                dataType = "longtext";
+            }
+            else if (varcharType.getBoundedLength() <= 255) {
+                dataType = "tinytext";
+            }
+            else if (varcharType.getBoundedLength() <= 65535) {
+                dataType = "text";
+            }
+            else if (varcharType.getBoundedLength() <= 16777215) {
+                dataType = "mediumtext";
+            }
+            else {
+                dataType = "longtext";
+            }
+            return WriteMapping.sliceMapping(dataType, varcharWriteFunction());
+        }
+
+        if (type.equals(jsonType)) {
+            return WriteMapping.sliceMapping("json", varcharWriteFunction());
+        }
+
+        return legacyToWriteMapping(session, type);
     }
 
     @Override
-    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type)
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting column types");
+        try {
+            createTable(session, tableMetadata, tableMetadata.getTable().getTableName());
+        }
+        catch (SQLException e) {
+            boolean exists = false; //SQL_STATE_ER_TABLE_EXISTS_ERROR.equals(e.getSQLState());
+            throw new TrinoException(exists ? ALREADY_EXISTS : JDBC_ERROR, e);
+        }
+    }
+
+    @Override
+    public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName)
+    {
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            String newRemoteColumnName = getIdentifierMapping().toRemoteColumnName(connection, newColumnName);
+            String sql = format(
+                    "ALTER TABLE %s RENAME COLUMN %s TO %s",
+                    quoted(handle.getCatalogName(), handle.getSchemaName(), handle.getTableName()),
+                    quoted(jdbcColumn.getColumnName()),
+                    quoted(newRemoteColumnName));
+            execute(connection, sql);
+        }
+        catch (SQLException e) {
+            // MySQL versions earlier than 8 do not support the above RENAME COLUMN syntax
+            // if (SQL_STATE_SYNTAX_ERROR.equals(e.getSQLState())) {
+            //     throw new TrinoException(NOT_SUPPORTED, format("Rename column not supported in catalog: '%s'", handle.getCatalogName()), e);
+            // }
+            throw new TrinoException(JDBC_ERROR, e);
+        }
+    }
+
+    @Override
+    protected void copyTableSchema(Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
+    {
+        String tableCopyFormat = "CREATE TABLE %s AS SELECT * FROM %s WHERE 0 = 1";
+        if (isGtidMode(connection)) {
+            tableCopyFormat = "CREATE TABLE %s LIKE %s";
+        }
+        String sql = format(
+                tableCopyFormat,
+                quoted(catalogName, schemaName, newTableName),
+                quoted(catalogName, schemaName, tableName));
+        execute(connection, sql);
     }
 
     @Override
     public void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName)
     {
-        RemoteTableName remoteTableName = handle.asPlainTable().getRemoteTableName();
-        String catalogName = remoteTableName.getCatalogName().orElse(null);
-        String schemaName = remoteTableName.getSchemaName().orElse(null);
-        if (compatibleMode.isMySQLMode()) {
-            verify(schemaName == null);
-            renameTable(session, null, catalogName, remoteTableName.getTableName(), newTableName);
-        }
-        else {
-            renameTable(session, catalogName, schemaName, remoteTableName.getTableName(), newTableName);
-        }
-    }
-
-    @Override
-    protected void renameTable(ConnectorSession session, Connection connection, String catalogName, String remoteSchemaName, String remoteTableName, String newRemoteSchemaName, String newRemoteTableName)
-            throws SQLException
-    {
-        if (!remoteSchemaName.equals(newRemoteSchemaName)) {
-            throw new TrinoException(NOT_SUPPORTED, "This connector does not support renaming tables across schemas");
-        }
-
-        execute(session, connection, format("ALTER TABLE %s RENAME TO %s", quoted(catalogName, remoteSchemaName, remoteTableName), quoted(compatibleMode.isMySQLMode() ? newRemoteTableName : newRemoteTableName.toUpperCase(ENGLISH))));
-    }
-
-    @Override
-    protected void renameColumn(ConnectorSession session, Connection connection, RemoteTableName remoteTableName, String remoteColumnName, String newRemoteColumnName)
-            throws SQLException
-    {
-        execute(session, connection, format("ALTER TABLE %s RENAME COLUMN %s TO %s", quoted(remoteTableName.getCatalogName().orElse(null), remoteTableName.getSchemaName().orElse(null), remoteTableName.getTableName()), quoted(remoteColumnName), quoted(newRemoteColumnName)));
-    }
-
-    @Override
-    public boolean supportsAggregationPushdown(ConnectorSession session, JdbcTableHandle table, List<AggregateFunction> aggregates, Map<String, ColumnHandle> assignments, List<List<ColumnHandle>> groupingSets)
-    {
-        return preventTextualTypeAggregationPushdown(groupingSets);
-    }
-
-    @Override
-    public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
-    {
-        if (!compatibleMode.isMySQLMode()) {
-            return false;
-        }
-        for (JdbcSortItem sortItem : sortOrder) {
-            Type sortItemType = sortItem.getColumn().getColumnType();
-            if (sortItemType instanceof CharType || sortItemType instanceof VarcharType) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    @Override
-    protected Optional<TopNFunction> topNFunction()
-    {
-        return compatibleMode.isMySQLMode() ? Optional.of((query, sortItems, limit) -> {
-            String orderBy = sortItems.stream().flatMap(sortItem -> {
-                String ordering = sortItem.getSortOrder().isAscending() ? "ASC" : "DESC";
-                String columnSorting = format("%s %s", quoted(sortItem.getColumn().getColumnName()), ordering);
-                return switch (sortItem.getSortOrder()) {
-                    case ASC_NULLS_FIRST, DESC_NULLS_LAST -> Stream.of(columnSorting);
-                    case ASC_NULLS_LAST -> Stream.of(format("ISNULL(%s) ASC", quoted(sortItem.getColumn().getColumnName())), columnSorting);
-                    case DESC_NULLS_FIRST -> Stream.of(format("ISNULL(%s) DESC", quoted(sortItem.getColumn().getColumnName())), columnSorting);
-                };
-            }).collect(joining(", "));
-            return format("%s ORDER BY %s LIMIT %s", query, orderBy, limit);
-        }) : Optional.empty();
-    }
-
-    @Override
-    public boolean isTopNGuaranteed(ConnectorSession session)
-    {
-        if (compatibleMode.isMySQLMode()) {
-            return true;
-        }
-        throw new UnsupportedOperationException("isTopNGuaranteed is not implemented on Oracle mode");
+        // MySQL doesn't support specifying the catalog name in a rename. By setting the
+        // catalogName parameter to null, it will be omitted in the ALTER TABLE statement.
+        verify(handle.getSchemaName() == null);
+        renameTable(session, null, handle.getCatalogName(), handle.getTableName(), newTableName);
     }
 
     @Override
     protected Optional<BiFunction<String, Long, String>> limitFunction()
     {
-        return Optional.of((sql, limit) -> compatibleMode.isMySQLMode() ? sql + " LIMIT " + limit : format("SELECT * FROM (%s) WHERE ROWNUM <= %s", sql, limit));
+        return Optional.of((sql, limit) -> sql + " LIMIT " + limit);
     }
 
     @Override
@@ -506,483 +580,135 @@ public class OceanBaseClient
     }
 
     @Override
-    protected boolean isSupportedJoinCondition(ConnectorSession session, JdbcJoinCondition joinCondition)
+    public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
     {
-        if (joinCondition.getOperator() == JoinCondition.Operator.IS_DISTINCT_FROM) {
-            return false;
+        for (JdbcSortItem sortItem : sortOrder) {
+            Type sortItemType = sortItem.getColumn().getColumnType();
+            if (sortItemType instanceof CharType || sortItemType instanceof VarcharType) {
+                // Remote database can be case insensitive.
+                return false;
+            }
         }
-        return !compatibleMode.isMySQLMode() || Stream.of(joinCondition.getLeftColumn(), joinCondition.getRightColumn()).map(JdbcColumnHandle::getColumnType).noneMatch(type -> type instanceof CharType || type instanceof VarcharType);
+        return true;
     }
 
     @Override
-    public Optional<PreparedQuery> implementJoin(ConnectorSession session, JoinType joinType, PreparedQuery leftSource, PreparedQuery rightSource, List<JdbcJoinCondition> joinConditions, Map<JdbcColumnHandle, String> rightAssignments, Map<JdbcColumnHandle, String> leftAssignments, JoinStatistics statistics)
+    protected Optional<TopNFunction> topNFunction()
     {
-        if (compatibleMode.isMySQLMode() && joinType == JoinType.FULL_OUTER) {
+        return Optional.of((query, sortItems, limit) -> {
+            String orderBy = sortItems.stream()
+                    .flatMap(sortItem -> {
+                        String ordering = sortItem.getSortOrder().isAscending() ? "ASC" : "DESC";
+                        String columnSorting = format("%s %s", quoted(sortItem.getColumn().getColumnName()), ordering);
+
+                        switch (sortItem.getSortOrder()) {
+                            case ASC_NULLS_FIRST:
+                                // In MySQL ASC implies NULLS FIRST
+                            case DESC_NULLS_LAST:
+                                // In MySQL DESC implies NULLS LAST
+                                return Stream.of(columnSorting);
+
+                            case ASC_NULLS_LAST:
+                                return Stream.of(
+                                        format("ISNULL(%s) ASC", quoted(sortItem.getColumn().getColumnName())),
+                                        columnSorting);
+                            case DESC_NULLS_FIRST:
+                                return Stream.of(
+                                        format("ISNULL(%s) DESC", quoted(sortItem.getColumn().getColumnName())),
+                                        columnSorting);
+                        }
+                        throw new UnsupportedOperationException("Unsupported sort order: " + sortItem.getSortOrder());
+                    })
+                    .collect(joining(", "));
+            return format("%s ORDER BY %s LIMIT %s", query, orderBy, limit);
+        });
+    }
+
+    @Override
+    public boolean isTopNGuaranteed(ConnectorSession session)
+    {
+        return true;
+    }
+
+    @Override
+    public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
+            JoinType joinType,
+            PreparedQuery leftSource,
+            PreparedQuery rightSource,
+            List<JdbcJoinCondition> joinConditions,
+            Map<JdbcColumnHandle, String> rightAssignments,
+            Map<JdbcColumnHandle, String> leftAssignments,
+            JoinStatistics statistics)
+    {
+        if (joinType == JoinType.FULL_OUTER) {
+            // Not supported in MySQL
             return Optional.empty();
         }
-        return implementJoinCostAware(session, joinType, leftSource, rightSource, statistics, () -> super.implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics));
+        return super.implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics);
     }
 
     @Override
-    public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
+    protected boolean isSupportedJoinCondition(JdbcJoinCondition joinCondition)
     {
-        String jdbcTypeName = typeHandle.getJdbcTypeName().orElseThrow(() -> new TrinoException(JDBC_ERROR, "Type name is missing: " + typeHandle));
-
-        Optional<ColumnMapping> mapping = getForcedMappingToVarchar(typeHandle);
-        if (mapping.isPresent()) {
-            return mapping;
+        if (joinCondition.getOperator() == JoinCondition.Operator.IS_DISTINCT_FROM) {
+            // Not supported in MySQL
+            return false;
         }
 
-        return switch (jdbcTypeName.toLowerCase(ENGLISH)) {
-            case "tinyint unsigned" -> Optional.of(smallintColumnMapping());
-            case "smallint unsigned", "year" -> Optional.of(integerColumnMapping());
-            case "int unsigned" -> Optional.of(bigintColumnMapping());
-            case "bigint unsigned" -> Optional.of(StandardColumnMappings.decimalColumnMapping(createDecimalType(20)));
-            case "date" -> Optional.of(dateColumnMapping());
-            case "json" -> Optional.of(jsonColumnMapping());
-            case "enum", "set" -> Optional.of(defaultVarcharColumnMapping(typeHandle.getColumnSize().orElse(MYSQL_MODE_CHAR_MAX_LENGTH), false));
-            case "datetime" -> Optional.of(timestampColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0)));
-            default -> switch (typeHandle.getJdbcType()) {
-                case Types.BIT -> Optional.of(booleanColumnMapping());
-                case Types.TINYINT -> Optional.of(tinyintColumnMapping());
-                case Types.SMALLINT -> Optional.of(smallintColumnMapping());
-                case Types.INTEGER -> Optional.of(integerColumnMapping());
-                case Types.BIGINT -> Optional.of(bigintColumnMapping());
-                case Types.REAL, TYPE_BINARY_FLOAT -> Optional.of(floatColumnMapping());
-                case Types.DOUBLE, TYPE_BINARY_DOUBLE -> Optional.of(doubleColumnMapping());
-                case Types.NUMERIC, Types.DECIMAL -> Optional.ofNullable(numericColumnMapping(session, typeHandle));
-                case Types.CHAR, Types.NCHAR -> Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), false));
-                case Types.VARCHAR, Types.NVARCHAR, Types.LONGVARCHAR -> Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), false));
-                case Types.CLOB -> Optional.of(clobColumnMapping());
-                case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> Optional.of(varbinaryColumnMapping());
-                case Types.TIME -> Optional.of(timeColumnMapping(typeHandle.getRequiredColumnSize()));
-                case Types.TIMESTAMP ->
-                        compatibleMode.isMySQLMode() ? Optional.of(timestampWithTimeZoneColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0))) : Optional.of(timestampColumnMapping(typeHandle.getRequiredColumnSize(), typeHandle.getDecimalDigits().orElse(0)));
-                default -> Optional.empty();
-            };
-        };
-    }
-
-    private ColumnMapping dateColumnMapping()
-    {
-        return compatibleMode.isMySQLMode() ? ColumnMapping.longMapping(DATE, dateReadFunctionUsingLocalDate(), dateWriteFunction(), FULL_PUSHDOWN) : ColumnMapping.longMapping(TIMESTAMP_SECONDS, dateToTimestampReadFunction(), timestampToDateWriteFunction(), FULL_PUSHDOWN);
-    }
-
-    private LongReadFunction dateToTimestampReadFunction()
-    {
-        return (resultSet, columnIndex) -> {
-            LocalDateTime timestamp = resultSet.getObject(columnIndex, LocalDateTime.class);
-            // Adjust years when the value is B.C. dates because Oracle returns +1 year unless converting to string in their server side
-            if (timestamp.getYear() <= 0) {
-                timestamp = timestamp.minusYears(1);
-            }
-            return toTrinoTimestamp(TIMESTAMP_SECONDS, timestamp);
-        };
-    }
-
-    private String getToDateExpression()
-    {
-        return compatibleMode.isMySQLMode() ? "CAST(? AS DATE)" : "TO_DATE(?, 'SYYYY-MM-DD HH24:MI:SS')";
-    }
-
-    private LongWriteFunction dateWriteFunction()
-    {
-        return new LongWriteFunction()
-        {
-            @Override
-            public String getBindExpression()
-            {
-                return getToDateExpression();
-            }
-
-            @Override
-            public void set(PreparedStatement statement, int index, long value)
-                    throws SQLException
-            {
-                if (compatibleMode.isMySQLMode()) {
-                    statement.setString(index, LocalDate.ofEpochDay(value).format(ISO_DATE));
-                }
-                else {
-                    long utcMillis = DAYS.toMillis(value);
-                    LocalDateTime date = LocalDateTime.from(Instant.ofEpochMilli(utcMillis).atZone(ZoneOffset.UTC));
-                    statement.setString(index, DATE_FORMATTER.format(date));
-                }
-            }
-
-            @Override
-            public void setNull(PreparedStatement statement, int index)
-                    throws SQLException
-            {
-                if (compatibleMode.isMySQLMode()) {
-                    statement.setObject(index, null);
-                }
-                else {
-                    statement.setNull(index, Types.VARCHAR);
-                }
-            }
-        };
-    }
-
-    private LongWriteFunction timestampToDateWriteFunction()
-    {
-        return new LongWriteFunction()
-        {
-            @Override
-            public String getBindExpression()
-            {
-                return getToDateExpression();
-            }
-
-            @Override
-            public void set(PreparedStatement statement, int index, long value)
-                    throws SQLException
-            {
-                long epochSecond = floorDiv(value, MICROSECONDS_PER_SECOND);
-                int microsOfSecond = floorMod(value, MICROSECONDS_PER_SECOND);
-                verify(microsOfSecond == 0, "Micros of second must be zero: '%s'", value);
-                LocalDateTime localDateTime = LocalDateTime.ofEpochSecond(epochSecond, 0, ZoneOffset.UTC);
-                statement.setString(index, TIMESTAMP_SECONDS_FORMATTER.format(localDateTime));
-            }
-
-            @Override
-            public void setNull(PreparedStatement statement, int index)
-                    throws SQLException
-            {
-                statement.setNull(index, Types.VARCHAR);
-            }
-        };
+        // Remote database can be case insensitive.
+        return Stream.of(joinCondition.getLeftColumn(), joinCondition.getRightColumn())
+                .map(JdbcColumnHandle::getColumnType)
+                .noneMatch(type -> type instanceof CharType || type instanceof VarcharType);
     }
 
     private ColumnMapping jsonColumnMapping()
     {
-        return ColumnMapping.sliceMapping(jsonType, (resultSet, columnIndex) -> jsonParse(utf8Slice(resultSet.getString(columnIndex))), varcharWriteFunction(), DISABLE_PUSHDOWN);
+        log.info(">>>>jsonColumnMapping data type");
+        return ColumnMapping.sliceMapping(
+                jsonType,
+                (resultSet, columnIndex) -> jsonParse(utf8Slice(resultSet.getString(columnIndex))),
+                varcharWriteFunction(),
+                DISABLE_PUSHDOWN);
     }
 
-    private ColumnMapping floatColumnMapping()
+    private static boolean isGtidMode(Connection connection)
     {
-        return ColumnMapping.longMapping(REAL, (resultSet, columnIndex) -> floatToRawIntBits(resultSet.getFloat(columnIndex)), realWriteFunction(), DISABLE_PUSHDOWN);
-    }
-
-    private ColumnMapping numericColumnMapping(ConnectorSession session, JdbcTypeHandle typeHandle)
-    {
-        int precision = typeHandle.getRequiredColumnSize();
-        if (precision == 0) {
-            if (getDecimalRounding(session) == ALLOW_OVERFLOW) {
-                DecimalType decimalType = createDecimalType(Decimals.MAX_PRECISION, getDecimalDefaultScale(session));
-                return ColumnMapping.objectMapping(decimalType, longDecimalReadFunction(decimalType, getDecimalRoundingMode(session)), longDecimalWriteFunction(decimalType), FULL_PUSHDOWN);
+        log.info(">>>>isGtidMode data type");
+        try (java.sql.Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery("SHOW VARIABLES LIKE 'gtid_mode'")) {
+            if (resultSet.next()) {
+                return !resultSet.getString("Value").equalsIgnoreCase("OFF");
             }
-            return null;
+
+            return false;
         }
-
-        int decimalDigits = typeHandle.getRequiredDecimalDigits();
-        int width = precision + max(-decimalDigits, 0);
-        int scale = max(decimalDigits, 0);
-
-        if (width <= Decimals.MAX_PRECISION) {
-            return StandardColumnMappings.decimalColumnMapping(createDecimalType(width, scale));
-        }
-        return getDecimalRounding(session) == ALLOW_OVERFLOW ? StandardColumnMappings.decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)) : null;
-    }
-
-    private ColumnMapping clobColumnMapping()
-    {
-        return ColumnMapping.sliceMapping(createUnboundedVarcharType(), (resultSet, columnIndex) -> utf8Slice(resultSet.getString(columnIndex)), varcharWriteFunction(), DISABLE_PUSHDOWN);
-    }
-
-    private int getMaxTimestampPrecision()
-    {
-        return compatibleMode.isMySQLMode() ? MYSQL_MODE_MAX_TIMESTAMP_PRECISION : ORACLE_MODE_MAX_TIMESTAMP_PRECISION;
-    }
-
-    private void verifyTimestampPrecision(int precision)
-    {
-        verify(1 <= precision && precision <= getMaxTimestampPrecision(), "Unexpected timestamp precision %s", precision);
-    }
-
-    private int getTimePrecision(int timeColumnSize)
-    {
-        if (timeColumnSize == ZERO_PRECISION_TIME_COLUMN_SIZE) {
-            return 0;
-        }
-        int timePrecision = timeColumnSize - ZERO_PRECISION_TIME_COLUMN_SIZE - 1;
-        verifyTimestampPrecision(timePrecision);
-        return timePrecision;
-    }
-
-    private int getTimestampPrecision(int timestampColumnSize, int scale)
-    {
-        if (timestampColumnSize < ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE) {
-            verifyTimestampPrecision(scale);
-            return scale;
-        }
-        else if (timestampColumnSize == ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE) {
-            return 0;
-        }
-        else {
-            int timestampPrecision = timestampColumnSize - ZERO_PRECISION_TIMESTAMP_COLUMN_SIZE - 1;
-            verifyTimestampPrecision(timestampPrecision);
-            return timestampPrecision;
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
-    private ColumnMapping timeColumnMapping(int timeColumnSize)
+    private static Optional<ColumnMapping> getUnsignedMapping(JdbcTypeHandle typeHandle)
     {
-        TimeType timeType = createTimeType(getTimePrecision(timeColumnSize));
-        return StandardColumnMappings.timeColumnMapping(timeType);
-    }
-
-    private String getToTimestampExpression(int precision)
-    {
-        if (precision == 0) {
-            return "TO_TIMESTAMP(?, 'SYYYY-MM-DD HH24:MI:SS')";
-        }
-        if (precision <= 2) {
-            return "TO_TIMESTAMP(?, 'SYYYY-MM-DD HH24:MI:SS.FF')";
-        }
-        return format("TO_TIMESTAMP(?, 'SYYYY-MM-DD HH24:MI:SS.FF%d')", precision);
-    }
-
-    private ColumnMapping timestampColumnMapping(int timestampColumnSize, int scale)
-    {
-        TimestampType timestampType = createTimestampType(getTimestampPrecision(timestampColumnSize, scale));
-        if (timestampType.getPrecision() <= TimestampType.MAX_SHORT_PRECISION) {
-            return ColumnMapping.longMapping(timestampType, timestampReadFunction(timestampType), timestampWriteFunction(timestampType));
-        }
-        return ColumnMapping.objectMapping(timestampType, longTimestampReadFunction(timestampType), longTimestampWriteFunction(timestampType));
-    }
-
-    private LongWriteFunction timestampWriteFunction(TimestampType timestampType)
-    {
-        return compatibleMode.isMySQLMode() ? StandardColumnMappings.timestampWriteFunction(timestampType) : new LongWriteFunction()
-        {
-            @Override
-            public String getBindExpression()
-            {
-                return getToTimestampExpression(timestampType.getPrecision());
-            }
-
-            @Override
-            public void set(PreparedStatement statement, int index, long epochMicros)
-                    throws SQLException
-            {
-                LocalDateTime timestamp = fromTrinoTimestamp(epochMicros);
-                statement.setString(index, TIMESTAMP_NANO_OPTIONAL_FORMATTER.format(timestamp));
-            }
-
-            @Override
-            public void setNull(PreparedStatement statement, int index)
-                    throws SQLException
-            {
-                statement.setNull(index, Types.VARCHAR);
-            }
-        };
-    }
-
-    private ObjectWriteFunction longTimestampWriteFunction(TimestampType timestampType)
-    {
-        return compatibleMode.isMySQLMode() ? StandardColumnMappings.longTimestampWriteFunction(timestampType, MYSQL_MODE_MAX_TIMESTAMP_PRECISION) : new ObjectWriteFunction()
-        {
-            @Override
-            public Class<?> getJavaType()
-            {
-                return LongTimestamp.class;
-            }
-
-            @Override
-            public String getBindExpression()
-            {
-                return getToTimestampExpression(timestampType.getPrecision());
-            }
-
-            @Override
-            public void set(PreparedStatement statement, int index, Object value)
-                    throws SQLException
-            {
-                LocalDateTime timestamp = fromLongTrinoTimestamp((LongTimestamp) value, timestampType.getPrecision());
-                statement.setString(index, TIMESTAMP_NANO_OPTIONAL_FORMATTER.format(timestamp));
-            }
-
-            @Override
-            public void setNull(PreparedStatement statement, int index)
-                    throws SQLException
-            {
-                statement.setNull(index, Types.VARCHAR);
-            }
-        };
-    }
-
-    private ColumnMapping timestampWithTimeZoneColumnMapping(int timestampColumnSize, int scale)
-    {
-        TimestampWithTimeZoneType trinoType = createTimestampWithTimeZoneType(getTimestampPrecision(timestampColumnSize, scale));
-        if (trinoType.getPrecision() <= TimestampWithTimeZoneType.MAX_SHORT_PRECISION) {
-            return ColumnMapping.longMapping(trinoType, shortTimestampWithTimeZoneReadFunction(), shortTimestampWithTimeZoneWriteFunction());
-        }
-        return ColumnMapping.objectMapping(trinoType, longTimestampWithTimeZoneReadFunction(), longTimestampWithTimeZoneWriteFunction());
-    }
-
-    private LongReadFunction shortTimestampWithTimeZoneReadFunction()
-    {
-        return (resultSet, columnIndex) -> {
-            Timestamp timestamp = resultSet.getTimestamp(columnIndex);
-            long millisUtc = timestamp.getTime();
-            return packDateTimeWithZone(millisUtc, UTC_KEY);
-        };
-    }
-
-    private LongWriteFunction shortTimestampWithTimeZoneWriteFunction()
-    {
-        return (statement, index, value) -> {
-            Instant instantValue = Instant.ofEpochMilli(unpackMillisUtc(value));
-            statement.setObject(index, instantValue);
-        };
-    }
-
-    private ObjectReadFunction longTimestampWithTimeZoneReadFunction()
-    {
-        return ObjectReadFunction.of(LongTimestampWithTimeZone.class, (resultSet, columnIndex) -> {
-            OffsetDateTime offsetDateTime = resultSet.getObject(columnIndex, OffsetDateTime.class);
-            return LongTimestampWithTimeZone.fromEpochSecondsAndFraction(offsetDateTime.toEpochSecond(), (long) offsetDateTime.getNano() * PICOSECONDS_PER_NANOSECOND, UTC_KEY);
-        });
-    }
-
-    private ObjectWriteFunction longTimestampWithTimeZoneWriteFunction()
-    {
-        return ObjectWriteFunction.of(LongTimestampWithTimeZone.class, (statement, index, value) -> {
-            long epochSeconds = floorDiv(value.getEpochMillis(), MILLISECONDS_PER_SECOND);
-            long nanosOfSecond = (long) floorMod(value.getEpochMillis(), MILLISECONDS_PER_SECOND) * NANOSECONDS_PER_MILLISECOND + value.getPicosOfMilli() / PICOSECONDS_PER_NANOSECOND;
-            Instant instantValue = Instant.ofEpochSecond(epochSeconds, nanosOfSecond);
-            statement.setObject(index, instantValue);
-        });
-    }
-
-    @Override
-    public WriteMapping toWriteMapping(ConnectorSession session, Type type)
-    {
-        if (type == BOOLEAN) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.booleanMapping("boolean", booleanWriteFunction()) : WriteMapping.booleanMapping("number(1)", booleanWriteFunction());
-        }
-        if (type == TINYINT) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.longMapping("tinyint", tinyintWriteFunction()) : WriteMapping.longMapping("number(3)", tinyintWriteFunction());
-        }
-        if (type == SMALLINT) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.longMapping("smallint", smallintWriteFunction()) : WriteMapping.longMapping("number(5)", smallintWriteFunction());
-        }
-        if (type == INTEGER) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.longMapping("integer", integerWriteFunction()) : WriteMapping.longMapping("number(10)", integerWriteFunction());
-        }
-        if (type == BIGINT) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.longMapping("bigint", bigintWriteFunction()) : WriteMapping.longMapping("number(19)", bigintWriteFunction());
-        }
-        if (type == REAL) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.longMapping("float", realWriteFunction()) : WriteMapping.longMapping("binary_float", realWriteFunction());
-        }
-        if (type == DOUBLE) {
-            return compatibleMode.isMySQLMode() ? WriteMapping.doubleMapping("double precision", doubleWriteFunction()) : WriteMapping.doubleMapping("binary_double", doubleWriteFunction());
-        }
-        if (type instanceof DecimalType decimalType) {
-            String dataType = format(compatibleMode.isMySQLMode() ? "decimal(%s, %s)" : "number(%s, %s)", decimalType.getPrecision(), decimalType.getScale());
-            if (decimalType.isShort()) {
-                return WriteMapping.longMapping(dataType, shortDecimalWriteFunction(decimalType));
-            }
-            return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
+        log.info(">>>>getUnsignedMapping data type");
+        if (typeHandle.getJdbcTypeName().isEmpty()) {
+            return Optional.empty();
         }
 
-        if (type instanceof CharType charType) {
-            String dataType;
-            if (compatibleMode.isMySQLMode()) {
-                dataType = charType.getLength() < MYSQL_MODE_CHAR_MAX_LENGTH ? "char(" + charType.getLength() + ")" : "clob";
-            }
-            else {
-                dataType = charType.getLength() < ORACLE_MODE_CHAR_MAX_LENGTH ? "char(" + charType.getLength() + " CHAR)" : "clob";
-            }
-            return WriteMapping.sliceMapping(dataType, charWriteFunction());
+        String typeName = typeHandle.getJdbcTypeName().get();
+        if (typeName.equalsIgnoreCase("tinyint unsigned")) {
+            return Optional.of(smallintColumnMapping());
+        }
+        if (typeName.equalsIgnoreCase("smallint unsigned")) {
+            return Optional.of(integerColumnMapping());
+        }
+        if (typeName.equalsIgnoreCase("int unsigned")) {
+            return Optional.of(bigintColumnMapping());
+        }
+        if (typeName.equalsIgnoreCase("bigint unsigned")) {
+            return Optional.of(decimalColumnMapping(createDecimalType(20)));
         }
 
-        if (type instanceof VarcharType varcharType) {
-            return WriteMapping.sliceMapping(getVarcharDataType(varcharType), varcharWriteFunction());
-        }
-
-        if (type.equals(jsonType)) {
-            return WriteMapping.sliceMapping("json", varcharWriteFunction());
-        }
-
-        if (type == VARBINARY) {
-            return WriteMapping.sliceMapping("blob", varbinaryWriteFunction());
-        }
-
-        if (type == DATE) {
-            return WriteMapping.longMapping("date", dateWriteFunction());
-        }
-
-        if (type instanceof TimeType timeType) {
-            if (timeType.getPrecision() <= MYSQL_MODE_MAX_TIMESTAMP_PRECISION) {
-                return WriteMapping.longMapping(format("time(%s)", timeType.getPrecision()), timeWriteFunction(timeType.getPrecision()));
-            }
-            return WriteMapping.longMapping(format("time(%s)", MYSQL_MODE_MAX_TIMESTAMP_PRECISION), timeWriteFunction(MYSQL_MODE_MAX_TIMESTAMP_PRECISION));
-        }
-
-        if (type instanceof TimestampType timestampType) {
-            if (compatibleMode.isMySQLMode()) {
-                if (timestampType.getPrecision() <= MYSQL_MODE_MAX_TIMESTAMP_PRECISION) {
-                    return WriteMapping.longMapping(format("datetime(%s)", timestampType.getPrecision()), timestampWriteFunction(timestampType));
-                }
-                return WriteMapping.objectMapping(format("datetime(%s)", MYSQL_MODE_MAX_TIMESTAMP_PRECISION), longTimestampWriteFunction(timestampType));
-            }
-            else {
-                if (type.equals(TIMESTAMP_SECONDS)) {
-                    return WriteMapping.longMapping("date", timestampToDateWriteFunction());
-                }
-                int precision = min(timestampType.getPrecision(), ORACLE_MODE_MAX_TIMESTAMP_PRECISION);
-                String dataType = format("timestamp(%d)", precision);
-                if (timestampType.isShort()) {
-                    return WriteMapping.longMapping(dataType, timestampWriteFunction(timestampType));
-                }
-                return WriteMapping.objectMapping(dataType, longTimestampWriteFunction(createTimestampType(precision)));
-            }
-        }
-
-        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
-            if (timestampWithTimeZoneType.getPrecision() <= MYSQL_MODE_MAX_TIMESTAMP_PRECISION) {
-                String dataType = format("timestamp(%d)", timestampWithTimeZoneType.getPrecision());
-                if (timestampWithTimeZoneType.getPrecision() <= TimestampWithTimeZoneType.MAX_SHORT_PRECISION) {
-                    return WriteMapping.longMapping(dataType, shortTimestampWithTimeZoneWriteFunction());
-                }
-                return WriteMapping.objectMapping(dataType, longTimestampWithTimeZoneWriteFunction());
-            }
-            return WriteMapping.objectMapping(format("timestamp(%d)", MYSQL_MODE_MAX_TIMESTAMP_PRECISION), longTimestampWithTimeZoneWriteFunction());
-        }
-
-        throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
-    }
-
-    private String getVarcharDataType(VarcharType varcharType)
-    {
-        if (compatibleMode.isMySQLMode()) {
-            if (varcharType.isUnbounded() || varcharType.getBoundedLength() > MEDIUMTEXT_MAX_BYTES) {
-                return "longtext";
-            }
-            else if (varcharType.getBoundedLength() <= TINYTEXT_MAX_BYTES) {
-                return "tinytext";
-            }
-            else if (varcharType.getBoundedLength() <= TEXT_MAX_BYTES) {
-                return "text";
-            }
-            else {
-                return "mediumtext";
-            }
-        }
-        else {
-            if (varcharType.isUnbounded() || varcharType.getBoundedLength() > VARCHAR2_MAX_LENGTH) {
-                return "clob";
-            }
-            else {
-                return "varchar2(" + varcharType.getBoundedLength() + " CHAR)";
-            }
-        }
-    }
-
-    private BooleanWriteFunction booleanWriteFunction()
-    {
-        return BooleanWriteFunction.of(Types.TINYINT, (statement, index, value) -> statement.setObject(index, value ? 1 : 0));
+        return Optional.empty();
     }
 }

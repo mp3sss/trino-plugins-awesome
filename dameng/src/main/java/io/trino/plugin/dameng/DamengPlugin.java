@@ -11,15 +11,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.oceanbase;
+package io.trino.plugin.dameng;
 
 import io.trino.plugin.jdbc.JdbcPlugin;
 
-public class OceanBasePlugin
+public class DamengPlugin
         extends JdbcPlugin
 {
-    public OceanBasePlugin()
+    public DamengPlugin()
     {
-        super("OceanBase", new OceanBaseClientModule());
+        super("dameng", new DamengClientModule());
     }
 }

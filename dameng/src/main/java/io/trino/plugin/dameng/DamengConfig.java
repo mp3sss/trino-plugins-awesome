@@ -11,15 +11,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.oceanbase;
+package io.trino.plugin.dameng;
 
-import io.trino.plugin.jdbc.JdbcPlugin;
+import io.airlift.configuration.Config;
+import io.airlift.units.Duration;
 
-public class OceanBasePlugin
-        extends JdbcPlugin
+import java.util.concurrent.TimeUnit;
+
+public class DamengConfig
 {
-    public OceanBasePlugin()
+    private Duration connectTimeout = new Duration(10, TimeUnit.SECONDS);
+
+    public Duration getConnectTimeout()
     {
-        super("OceanBase", new OceanBaseClientModule());
+        return connectTimeout;
+    }
+
+    @Config("dameng.connect-timeout")
+    public DamengConfig setConnectTimeout(Duration connectTimeout)
+    {
+        this.connectTimeout = connectTimeout;
+        return this;
     }
 }

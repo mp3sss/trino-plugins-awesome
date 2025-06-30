@@ -16,29 +16,35 @@ package io.trino.plugin.oceanbase;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.units.Duration;
-import jakarta.validation.constraints.Min;
+
+import javax.validation.constraints.Min;
+import javax.validation.constraints.NotNull;
 
 import java.util.concurrent.TimeUnit;
 
 public class OceanBaseConfig
 {
-    private OceanBaseCompatibleMode compatibleMode = OceanBaseCompatibleMode.MySQL;
     private boolean autoReconnect = true;
     private int maxReconnects = 3;
     private Duration connectionTimeout = new Duration(10, TimeUnit.SECONDS);
-    private boolean driverUseInformationSchema = true;
-    private boolean remarksReportingEnabled;
 
-    public OceanBaseCompatibleMode getCompatibleMode()
+    // Using `useInformationSchema=true` prevents race condition inside MySQL driver's java.sql.DatabaseMetaData.getColumns
+    // implementation, which throw SQL exception when a table disappears during listing.
+    // Using `useInformationSchema=false` may provide more diagnostic information (see https://github.com/trinodb/trino/issues/1597)
+    private boolean driverUseInformationSchema = true;
+    private ArrayMapping arrayMapping = ArrayMapping.DISABLED;
+
+    public enum ArrayMapping
     {
-        return compatibleMode;
+        DISABLED,
+        AS_ARRAY,
+        AS_JSON,
     }
 
-    @Config("oceanbase.compatible-mode")
-    public OceanBaseConfig setCompatibleMode(String compatibleMode)
+    @NotNull
+    public ArrayMapping getArrayMapping()
     {
-        this.compatibleMode = OceanBaseCompatibleMode.parse(compatibleMode);
-        return this;
+        return arrayMapping;
     }
 
     public boolean isAutoReconnect()
@@ -46,7 +52,7 @@ public class OceanBaseConfig
         return autoReconnect;
     }
 
-    @Config("oceanbase.auto-reconnect")
+    @Config("mysql.auto-reconnect")
     public OceanBaseConfig setAutoReconnect(boolean autoReconnect)
     {
         this.autoReconnect = autoReconnect;
@@ -59,7 +65,7 @@ public class OceanBaseConfig
         return maxReconnects;
     }
 
-    @Config("oceanbase.max-reconnects")
+    @Config("mysql.max-reconnects")
     public OceanBaseConfig setMaxReconnects(int maxReconnects)
     {
         this.maxReconnects = maxReconnects;
@@ -71,7 +77,7 @@ public class OceanBaseConfig
         return connectionTimeout;
     }
 
-    @Config("oceanbase.connection-timeout")
+    @Config("mysql.connection-timeout")
     public OceanBaseConfig setConnectionTimeout(Duration connectionTimeout)
     {
         this.connectionTimeout = connectionTimeout;
@@ -83,23 +89,11 @@ public class OceanBaseConfig
         return driverUseInformationSchema;
     }
 
-    @Config("oceanbase.use-information-schema")
-    @ConfigDescription("Value of JDBC driver connection property 'useInformationSchema' on MySQL mode")
+    @Config("mysql.jdbc.use-information-schema")
+    @ConfigDescription("Value of useInformationSchema MySQL JDBC driver connection property")
     public OceanBaseConfig setDriverUseInformationSchema(boolean driverUseInformationSchema)
     {
         this.driverUseInformationSchema = driverUseInformationSchema;
-        return this;
-    }
-
-    public boolean isRemarksReportingEnabled()
-    {
-        return remarksReportingEnabled;
-    }
-
-    @Config("oceanbase.remarks-reporting.enabled")
-    public OceanBaseConfig setRemarksReportingEnabled(boolean enabled)
-    {
-        this.remarksReportingEnabled = enabled;
         return this;
     }
 }

@@ -11,17 +11,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.plugin.oceanbase;
+package io.trino.plugin.dameng;
 
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
 import com.google.inject.Singleton;
-import com.oceanbase.jdbc.Driver;
+import dm.jdbc.driver.DmDriver;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.ConnectionFactory;
-import io.trino.plugin.jdbc.DecimalModule;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
@@ -32,39 +31,29 @@ import java.util.Properties;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
-public class OceanBaseClientModule
+public class DamengClientModule
         implements Module
 {
     @Override
     public void configure(Binder binder)
     {
-        binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(OceanBaseClient.class).in(Scopes.SINGLETON);
-        configBinder(binder).bindConfig(OceanBaseJdbcConfig.class);
-        configBinder(binder).bindConfig(OceanBaseConfig.class);
-        binder.install(new DecimalModule());
+        binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(DamengClient.class).in(Scopes.SINGLETON);
+        configBinder(binder).bindConfig(DamengConfig.class);
     }
 
     @Provides
     @Singleton
     @ForBaseJdbc
-    public static ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, OceanBaseConfig mySqlConfig)
+    public static ConnectionFactory connectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider, DamengConfig damengConfig)
             throws SQLException
     {
         Properties connectionProperties = new Properties();
-        connectionProperties.setProperty("useInformationSchema", Boolean.toString(mySqlConfig.isDriverUseInformationSchema()));
-        connectionProperties.setProperty("useUnicode", "true");
-        connectionProperties.setProperty("characterEncoding", "utf8");
-        connectionProperties.setProperty("tinyInt1isBit", "false");
-        if (mySqlConfig.isAutoReconnect()) {
-            connectionProperties.setProperty("autoReconnect", String.valueOf(mySqlConfig.isAutoReconnect()));
-            connectionProperties.setProperty("maxReconnects", String.valueOf(mySqlConfig.getMaxReconnects()));
-        }
-        if (mySqlConfig.getConnectionTimeout() != null) {
-            connectionProperties.setProperty("connectTimeout", String.valueOf(mySqlConfig.getConnectionTimeout().toMillis()));
+        if (damengConfig.getConnectTimeout() != null) {
+            connectionProperties.setProperty("connectTimeout", String.valueOf(damengConfig.getConnectTimeout().toMillis()));
         }
 
         return new DriverConnectionFactory(
-                new Driver(),
+                new DmDriver(),
                 config.getConnectionUrl(),
                 connectionProperties,
                 credentialProvider);
